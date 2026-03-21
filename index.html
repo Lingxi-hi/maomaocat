@@ -112,7 +112,16 @@ function removeBackground(img) {
   const cx = off.getContext('2d');
   cx.drawImage(img, 0, 0);
 
-  const id   = cx.getImageData(0, 0, cw, ch);
+  let id;
+  try {
+    id = cx.getImageData(0, 0, cw, ch);
+  } catch (e) {
+    // CORS / file:// restriction — tainted canvas; fall back to original image element
+    // (returning the tainted canvas would crash drawImage on the main canvas too)
+    console.warn('removeBackground: getImageData blocked, cat will have white bg.', e);
+    return img;
+  }
+
   const data = id.data;
 
   // A pixel counts as "background" if it is bright and nearly unsaturated
