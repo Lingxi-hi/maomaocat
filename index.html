@@ -100,15 +100,83 @@ function chooseWalkableTarget() {
 }
 
 // ─────────────────────────────────────────
+// removeBackground — flood-fill from image
+// borders to strip the cream/white JPG
+// background, preserving the cat's own
+// white fur (which isn't border-connected)
+// ─────────────────────────────────────────
+function removeBackground(img) {
+  const cw = img.naturalWidth, ch = img.naturalHeight;
+  const off = document.createElement('canvas');
+  off.width = cw; off.height = ch;
+  const cx = off.getContext('2d');
+  cx.drawImage(img, 0, 0);
+
+  const id   = cx.getImageData(0, 0, cw, ch);
+  const data = id.data;
+
+  // A pixel counts as "background" if it is bright and nearly unsaturated
+  // (cream, off-white, light grey shadow under the cat's feet, etc.)
+  function isBg(i) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const sat = mx === 0 ? 0 : (mx - mn) / mx;
+    return mx > 185 && sat < 0.25;
+  }
+
+  const visited = new Uint8Array(cw * ch);
+  const queue   = [];
+
+  // Seed from all four border edges
+  for (let x = 0; x < cw; x++) {
+    for (const y of [0, ch - 1]) {
+      const p = y * cw + x;
+      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
+    }
+  }
+  for (let y = 1; y < ch - 1; y++) {
+    for (const x of [0, cw - 1]) {
+      const p = y * cw + x;
+      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
+    }
+  }
+
+  // BFS — remove every reachable background pixel
+  let qi = 0;
+  while (qi < queue.length) {
+    const p = queue[qi++];
+    data[p * 4 + 3] = 0;                 // fully transparent
+    const px = p % cw, py = (p / cw) | 0;
+    const neighbors = [
+      py > 0    ? p - cw : -1,
+      py < ch-1 ? p + cw : -1,
+      px > 0    ? p - 1  : -1,
+      px < cw-1 ? p + 1  : -1,
+    ];
+    for (const n of neighbors) {
+      if (n >= 0 && !visited[n] && isBg(n * 4)) {
+        visited[n] = 1; queue.push(n);
+      }
+    }
+  }
+
+  cx.putImageData(id, 0, 0);
+  return off; // HTMLCanvasElement — usable with drawImage
+}
+
+// ─────────────────────────────────────────
 // SpriteAnimator — extracts frames from a
 // 4×4 sprite sheet and draws with optional
-// horizontal flip
+// horizontal flip.
+// Accepts either HTMLImageElement or the
+// HTMLCanvasElement returned by removeBackground
 // ─────────────────────────────────────────
 class SpriteAnimator {
-  constructor(img) {
-    this.img    = img;
-    this.frameW = img.naturalWidth  / 4;
-    this.frameH = img.naturalHeight / 4;
+  constructor(source) {
+    // source can be HTMLImageElement or HTMLCanvasElement
+    this.img    = source;
+    this.frameW = (source.naturalWidth  ?? source.width)  / 4;
+    this.frameH = (source.naturalHeight ?? source.height) / 4;
   }
 
   // destX/destY = top-left of destination; flipH flips sprite around its centre
@@ -120,7 +188,6 @@ class SpriteAnimator {
 
     ctx.save();
     if (flipH) {
-      // Mirror: translate to right edge then scale -1 on x
       ctx.translate(destX + destW, destY);
       ctx.scale(-1, 1);
       ctx.drawImage(this.img, sx, sy, this.frameW, this.frameH,
@@ -203,7 +270,7 @@ class Cat {
     // Movement target
     this.tx = 600;
     this.ty = 570;
-    this.facingRight = false; // sprites face LEFT by default
+    this.facingRight = true; // sprites face RIGHT by default
 
     // State
     this.state     = null;
@@ -281,8 +348,12 @@ class Cat {
       return;
     }
 
-    // Stationary → moving: stand up first
+    // Stationary → moving: pre-choose target so RISING faces correct direction
     if (wasStationary && wantMoving) {
+      const { tx, ty } = chooseWalkableTarget();
+      this.tx = tx;
+      this.ty = ty;
+      this.facingRight = tx > this.x;   // face the destination NOW
       this._applyState(S.RISING, target);
       return;
     }
@@ -290,12 +361,15 @@ class Cat {
     // Direct switch (RUN↔WALK, LOOK↔GROOM, one-shot→target, etc.)
     this._applyState(target);
 
-    // Pick a destination for movement states
+    // Pick a destination for movement states (not if target was pre-set above)
     if (target === S.WALK || target === S.RUN) {
-      const { tx, ty } = chooseWalkableTarget();
-      this.tx = tx;
-      this.ty = ty;
-      this.facingRight = tx > this.x;
+      // Only re-pick if we didn't come from a RISING pre-selection
+      if (this.tx === this.x && this.ty === this.y) {
+        const { tx, ty } = chooseWalkableTarget();
+        this.tx = tx;
+        this.ty = ty;
+        this.facingRight = tx > this.x;
+      }
     }
   }
 
@@ -346,9 +420,9 @@ class Cat {
     if (!isObstacle(nx, ny)) {
       this.x = nx;
       this.y = ny;
-      this.facingRight = dx > 0;
+      this.facingRight = dx > 0; // update facing only while actually moving
     } else {
-      // Blocked — stop and pick new goal
+      // Blocked — keep current facing and pick a new goal
       this._arrive();
     }
   }
@@ -398,8 +472,8 @@ class Cat {
     ctx.fill();
     ctx.restore();
 
-    // Sprite: sprites face LEFT; flip when moving right
-    this.currentAnimator.draw(ctx, frameIdx, destX, destY, w, h, this.facingRight);
+    // Sprite: sprites face RIGHT; flip when facing left (!facingRight)
+    this.currentAnimator.draw(ctx, frameIdx, destX, destY, w, h, !this.facingRight);
   }
 }
 
@@ -445,10 +519,11 @@ async function startGame() {
 
   loading.classList.add('hidden');
 
+  // Strip white/cream JPG background from each sprite sheet
   const animators = {
-    run:  new SpriteAnimator(runImg),
-    walk: new SpriteAnimator(walkImg),
-    sit:  new SpriteAnimator(sitImg),
+    run:  new SpriteAnimator(removeBackground(runImg)),
+    walk: new SpriteAnimator(removeBackground(walkImg)),
+    sit:  new SpriteAnimator(removeBackground(sitImg)),
   };
 
   const cat = new Cat(animators);
