@@ -124,10 +124,9 @@ function removeBackground(img) {
   try {
     id = cx.getImageData(0, 0, cw, ch);
   } catch (e) {
-    // CORS / file:// restriction — tainted canvas; fall back to original image element.
-    // Mark it so SpriteAnimator can use multiply blend to hide the white background.
-    console.warn('removeBackground: getImageData blocked, using blend fallback.', e);
-    img._blendFallback = true;
+    // CORS / file:// restriction — tainted canvas; return original image.
+    // Cat will have a white rectangle but colours stay correct.
+    console.warn('removeBackground: getImageData blocked, returning original image.', e);
     return img;
   }
 
@@ -226,10 +225,6 @@ class SpriteAnimator {
     const sy  = row * this.frameH;
 
     ctx.save();
-    // multiply blend: white × bg = bg (white vanishes), fur × bg = slightly darker
-    // Used when getImageData was blocked (file:// or missing CORS) so we couldn't
-    // do proper pixel-level background removal.
-    if (this.img._blendFallback) ctx.globalCompositeOperation = 'multiply';
     if (flipH) {
       ctx.translate(destX + destW, destY);
       ctx.scale(-1, 1);
@@ -539,11 +534,10 @@ async function loadImage(src) {
     });
   } catch (_) {
     // Fallback for file:// protocol or network errors.
-    // The canvas will be tainted → removeBackground marks _blendFallback
-    // and SpriteAnimator uses multiply blend to hide white pixels visually.
+    // Canvas will be tainted so getImageData fails → cat gets white rectangle,
+    // but at least colours are correct (better than ghostly multiply effect).
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img._blendFallback = true;
       img.onload  = () => resolve(img);
       img.onerror = () => reject(src);
       img.src = src;
