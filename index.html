@@ -100,18 +100,8 @@ function chooseWalkableTarget() {
 }
 
 // ─────────────────────────────────────────
-// removeBackground — strips solid-colour
-// backgrounds from PNG sprite sheets.
-//
-// 1. If the PNG already carries transparency
-//    (e.g. exported with transparent bg) the
-//    canvas is returned immediately — no work
-//    needed.
-// 2. Otherwise a BFS flood-fill from every
-//    border pixel removes the solid bg.
-//    PNG has exact, lossless colours so a
-//    tight threshold (≤25 distance) is fine;
-//    no need for JPEG-fringe heuristics.
+// removeBackground — strips solid-colour or checkerboard backgrounds.
+// Uses per-frame BFS so interior frames don't depend on inter-frame paths.
 // ─────────────────────────────────────────
 function removeBackground(img) {
   const cw = img.naturalWidth, ch = img.naturalHeight;
@@ -124,76 +114,82 @@ function removeBackground(img) {
   try {
     id = cx.getImageData(0, 0, cw, ch);
   } catch (e) {
-    // CORS / file:// restriction — tainted canvas; return original image.
-    // Cat will have a white rectangle but colours stay correct.
-    console.warn('removeBackground: getImageData blocked, returning original image.', e);
+    console.error('[BG] getImageData BLOCKED:', e.message, '→ cat will show with bg rectangle');
     return img;
   }
 
   const data = id.data;
 
-  // ── Case 1: PNG already has transparent corners → already cut out ────
-  const corners = [0, (cw-1)*4, (ch-1)*cw*4, ((ch-1)*cw+cw-1)*4];
-  if (corners.some(c => data[c+3] < 250)) {
-    // Image already carries its own alpha — use it as-is
+  // ── Diagnostic: log corner pixels ────────────────────────────────────
+  const TL = 0, TR = (cw-1)*4, BL = (ch-1)*cw*4, BR = ((ch-1)*cw+cw-1)*4;
+  console.log(`[BG] ${cw}×${ch}  corners α: TL=${data[TL+3]} TR=${data[TR+3]} BL=${data[BL+3]} BR=${data[BR+3]}`);
+  console.log(`[BG] TL pixel: rgba(${data[TL]},${data[TL+1]},${data[TL+2]},${data[TL+3]})`);
+
+  // ── Case 1: already transparent ──────────────────────────────────────
+  if (data[TL+3] < 250 || data[TR+3] < 250 || data[BL+3] < 250 || data[BR+3] < 250) {
+    console.log('[BG] PNG already transparent → returning as-is');
     return off;
   }
 
-  // ── Case 2: solid or checkerboard background — BFS flood-fill ───────
-  // Sample primary bg color from top-left corner, then scan top edge for
-  // a second distinct color (handles two-tone checkerboard backgrounds).
-  const bgR1 = data[0], bgG1 = data[1], bgB1 = data[2];
-  const THRESH = 35 * 35;
+  // ── Case 2: opaque bg — detect up to two colors (checkerboard support) ──
+  const bgR1 = data[TL], bgG1 = data[TL+1], bgB1 = data[TL+2];
+  const THRESH = 50 * 50;
 
+  // Scan top border then left border to find the second checker color
   let bgR2 = bgR1, bgG2 = bgG1, bgB2 = bgB1;
-  for (let x = 1; x < cw; x++) {
-    const i = x * 4;
-    const dr = data[i]-bgR1, dg = data[i+1]-bgG1, db = data[i+2]-bgB1;
-    if (dr*dr + dg*dg + db*db > THRESH) {
-      bgR2 = data[i]; bgG2 = data[i+1]; bgB2 = data[i+2];
-      break;
+  outer: for (const [dx, dy, len] of [[1,0,cw],[0,1,ch]]) {
+    for (let p = 1; p < len; p++) {
+      const i = ((dy?p:0) * cw + (dx?p:0)) * 4;
+      const dr = data[i]-bgR1, dg = data[i+1]-bgG1, db = data[i+2]-bgB1;
+      if (dr*dr + dg*dg + db*db > THRESH) {
+        bgR2 = data[i]; bgG2 = data[i+1]; bgB2 = data[i+2];
+        break outer;
+      }
     }
   }
+  console.log(`[BG] bg1=(${bgR1},${bgG1},${bgB1})  bg2=(${bgR2},${bgG2},${bgB2})  THRESH=${THRESH}`);
 
-  function isBg(i) {
+  const isBg = i => {
     const r = data[i], g = data[i+1], b = data[i+2];
+    if (data[i+3] === 0) return true;
     const d1 = (r-bgR1)**2 + (g-bgG1)**2 + (b-bgB1)**2;
     const d2 = (r-bgR2)**2 + (g-bgG2)**2 + (b-bgB2)**2;
     return d1 <= THRESH || d2 <= THRESH;
-  }
+  };
 
-  const visited = new Uint8Array(cw * ch);
-  const queue   = [];
+  // ── Per-frame BFS: each of 16 cells processed independently ──────────
+  const COLS = 4, ROWS = 4;
+  const fw = (cw / COLS) | 0, fh = (ch / ROWS) | 0;
+  let totalRemoved = 0;
 
-  for (let x = 0; x < cw; x++) {
-    for (const y of [0, ch - 1]) {
-      const p = y * cw + x;
-      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const x0 = col * fw, y0 = row * fh;
+      const x1 = x0 + fw, y1 = y0 + fh;
+      const vis = new Uint8Array(fw * fh);
+      const queue = [];
+
+      const seed = (gx, gy) => {
+        if (gx < x0 || gx >= x1 || gy < y0 || gy >= y1) return;
+        const lp = (gy-y0)*fw + (gx-x0);
+        if (vis[lp]) return;
+        if (!isBg((gy*cw+gx)*4)) return;
+        vis[lp] = 1; queue.push(gx, gy);
+      };
+
+      for (let x = x0; x < x1; x++) { seed(x, y0); seed(x, y1-1); }
+      for (let y = y0+1; y < y1-1; y++) { seed(x0, y); seed(x1-1, y); }
+
+      for (let qi = 0; qi < queue.length; ) {
+        const gx = queue[qi++], gy = queue[qi++];
+        data[(gy*cw+gx)*4+3] = 0;
+        totalRemoved++;
+        seed(gx-1, gy); seed(gx+1, gy); seed(gx, gy-1); seed(gx, gy+1);
+      }
     }
   }
-  for (let y = 1; y < ch - 1; y++) {
-    for (const x of [0, cw - 1]) {
-      const p = y * cw + x;
-      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
-    }
-  }
 
-  let qi = 0;
-  while (qi < queue.length) {
-    const p = queue[qi++];
-    data[p * 4 + 3] = 0;                         // fully transparent
-    const px = p % cw, py = (p / cw) | 0;
-    const nbrs = [
-      py > 0    ? p - cw : -1,
-      py < ch-1 ? p + cw : -1,
-      px > 0    ? p - 1  : -1,
-      px < cw-1 ? p + 1  : -1,
-    ];
-    for (const n of nbrs) {
-      if (n >= 0 && !visited[n] && isBg(n * 4)) { visited[n] = 1; queue.push(n); }
-    }
-  }
-
+  console.log(`[BG] BFS done — removed ${totalRemoved} px`);
   cx.putImageData(id, 0, 0);
   return off;
 }
