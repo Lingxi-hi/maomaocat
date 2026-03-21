@@ -134,7 +134,7 @@ function removeBackground(img) {
 
   // ── Case 1: PNG already has transparent corners → already cut out ────
   const corners = [0, (cw-1)*4, (ch-1)*cw*4, ((ch-1)*cw+cw-1)*4];
-  if (corners.some(c => data[c+3] < 200)) {
+  if (corners.some(c => data[c+3] < 250)) {
     // Image already carries its own alpha — use it as-is
     return off;
   }
@@ -143,7 +143,7 @@ function removeBackground(img) {
   // Sample background colour from the top-left corner pixel.
   // PNG is lossless so all bg pixels should be very close to this value.
   const bgR = data[0], bgG = data[1], bgB = data[2];
-  const THRESH = 25 * 25; // tight: PNG has no compression noise
+  const THRESH = 40 * 40; // PNG anti-aliased edges can drift up to ~40 units
 
   function isBg(i) {
     const dr = data[i]-bgR, dg = data[i+1]-bgG, db = data[i+2]-bgB;
@@ -180,22 +180,6 @@ function removeBackground(img) {
     for (const n of nbrs) {
       if (n >= 0 && !visited[n] && isBg(n * 4)) { visited[n] = 1; queue.push(n); }
     }
-  }
-
-  // ── Light feathering on anti-aliased edges ───────────────────────────
-  const FEATHER = 60; // px colour distance over which to fade alpha
-  for (let p = 0; p < cw * ch; p++) {
-    if (data[p * 4 + 3] === 0) continue;
-    const px = p % cw, py = (p / cw) | 0;
-    const nearTransp =
-      (py > 0    && data[(p - cw) * 4 + 3] === 0) ||
-      (py < ch-1 && data[(p + cw) * 4 + 3] === 0) ||
-      (px > 0    && data[(p - 1)  * 4 + 3] === 0) ||
-      (px < cw-1 && data[(p + 1)  * 4 + 3] === 0);
-    if (!nearTransp) continue;
-    const dr = data[p*4]-bgR, dg = data[p*4+1]-bgG, db = data[p*4+2]-bgB;
-    const d  = Math.sqrt(dr*dr + dg*dg + db*db);
-    if (d < FEATHER) data[p * 4 + 3] = Math.round((d / FEATHER) * 255);
   }
 
   cx.putImageData(id, 0, 0);
