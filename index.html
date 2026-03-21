@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>猫咪乐园</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a2e1a;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #gameCanvas {
+      max-width: 100%;
+      max-height: 100vh;
+      display: block;
+      image-rendering: pixelated;
+    }
+    #loadingScreen {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, #2d5a27, #1a3a10);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: #e8f5e0;
+      font-family: 'Microsoft YaHei', 'PingFang SC', Arial, sans-serif;
+      z-index: 10;
+      transition: opacity 0.5s;
+    }
+    #loadingScreen h1 {
+      font-size: 2.4em;
+      margin-bottom: 0.6em;
+      text-shadow: 2px 2px 6px rgba(0,0,0,0.4);
+      letter-spacing: 0.1em;
+    }
+    #loadingScreen p {
+      font-size: 1em;
+      opacity: 0.85;
+      margin-top: 0.3em;
+    }
+    #loadingScreen.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="loadingScreen">
+    <h1>🐱 猫咪乐园</h1>
+    <p id="loadMsg">加载中，请稍候...</p>
+  </div>
+  <canvas id="gameCanvas" width="1200" height="750"></canvas>
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const rand  = (a, b) => a + Math.random() * (b - a);
+const W = 1200, H = 750;
+
+// ─────────────────────────────────────────
+// Obstacle zones  (% of canvas → px at init)
+// Tuned to the watercolor garden background
+// ─────────────────────────────────────────
+const OBSTACLE_PCT = [
+  { id: 'pond',        x1: 0.00, y1: 0.58, x2: 0.18, y2: 1.00 },
+  { id: 'house',       x1: 0.60, y1: 0.27, x2: 0.83, y2: 0.70 },
+  { id: 'stone_wall',  x1: 0.00, y1: 0.03, x2: 0.52, y2: 0.35 },
+  { id: 'fence',       x1: 0.37, y1: 0.03, x2: 0.67, y2: 0.33 },
+  { id: 'left_tree',   x1: 0.00, y1: 0.00, x2: 0.10, y2: 0.60 },
+  { id: 'right_tree',  x1: 0.84, y1: 0.00, x2: 1.00, y2: 0.65 },
+  { id: 'bench',       x1: 0.13, y1: 0.29, x2: 0.41, y2: 0.53 },
+  { id: 'sign',        x1: 0.73, y1: 0.41, x2: 0.85, y2: 0.63 },
+];
+
+const OBSTACLES = OBSTACLE_PCT.map(o => ({
+  id: o.id,
+  x1: o.x1 * W, y1: o.y1 * H,
+  x2: o.x2 * W, y2: o.y2 * H,
+}));
+
+function isObstacle(x, y) {
+  return OBSTACLES.some(o => x >= o.x1 && x <= o.x2 && y >= o.y1 && y <= o.y2);
+}
+
+// Cat wanders mainly in the grass/path foreground
+function chooseWalkableTarget() {
+  for (let i = 0; i < 50; i++) {
+    const tx = rand(80, 1120);
+    const ty = rand(370, 710);
+    if (!isObstacle(tx, ty)) return { tx, ty };
+  }
+  return { tx: 600, ty: 570 }; // safe fallback on path centre
+}
+
+// ─────────────────────────────────────────
+// SpriteAnimator — extracts frames from a
+// 4×4 sprite sheet and draws with optional
+// horizontal flip
+// ─────────────────────────────────────────
+class SpriteAnimator {
+  constructor(img) {
+    this.img    = img;
+    this.frameW = img.naturalWidth  / 4;
+    this.frameH = img.naturalHeight / 4;
+  }
+
+  // destX/destY = top-left of destination; flipH flips sprite around its centre
+  draw(ctx, frameIndex, destX, destY, destW, destH, flipH) {
+    const col = frameIndex % 4;
+    const row = Math.floor(frameIndex / 4);
+    const sx  = col * this.frameW;
+    const sy  = row * this.frameH;
+
+    ctx.save();
+    if (flipH) {
+      // Mirror: translate to right edge then scale -1 on x
+      ctx.translate(destX + destW, destY);
+      ctx.scale(-1, 1);
+      ctx.drawImage(this.img, sx, sy, this.frameW, this.frameH,
+                    0, 0, destW, destH);
+    } else {
+      ctx.drawImage(this.img, sx, sy, this.frameW, this.frameH,
+                    destX, destY, destW, destH);
+    }
+    ctx.restore();
+  }
+}
+
+// ─────────────────────────────────────────
+// Cat State Machine
+// ─────────────────────────────────────────
+const S = {
+  IDLE:     'IDLE',     // sitting still, slow head bob
+  LOOK:     'LOOK',     // watching butterfly (sit.jpg rows 0-1)
+  GROOM:    'GROOM',    // grooming (sit.jpg rows 2-3)
+  WALK:     'WALK',     // walking to target
+  RUN:      'RUN',      // running to target
+  STOPPING: 'STOPPING', // one-shot: walk frames reversed
+  RISING:   'RISING',   // one-shot: stand up from sit
+};
+
+// Frame sequences per state
+const SEQ = {
+  IDLE:     [1, 0],
+  LOOK:     [0,1,2,3,4,5,6,7],
+  GROOM:    [8,9,10,11,12,13,14,15],
+  WALK:     [4,5,6,7],
+  RUN:      [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+  STOPPING: [7,6,5,4,3,2,1,0],
+  RISING:   [0,1,2,3,4],
+};
+
+// Which sprite sheet each state uses (key into animators object)
+const SHEET = {
+  IDLE:     'walk',
+  LOOK:     'sit',
+  GROOM:    'sit',
+  WALK:     'walk',
+  RUN:      'run',
+  STOPPING: 'walk',
+  RISING:   'walk',
+};
+
+// Animation speed (frames per second) per state
+const FPS = {
+  IDLE:     1.5,
+  LOOK:     3.5,
+  GROOM:    3.5,
+  WALK:     10,
+  RUN:      18,
+  STOPPING: 10,
+  RISING:   8,
+};
+
+// Movement speed (px/s) per state
+const SPEED = {
+  IDLE: 0, LOOK: 0, GROOM: 0,
+  WALK: 80, RUN: 210, STOPPING: 0, RISING: 0,
+};
+
+// One-shot states complete then hand off to nextState
+const ONE_SHOT = new Set([S.STOPPING, S.RISING]);
+
+// ───────── stationary / moving sets for transition logic ─────────
+const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM]);
+const MOVING     = new Set([S.WALK, S.RUN]);
+
+class Cat {
+  constructor(animators) {
+    this.anim = animators;
+
+    // Position (foot-centre of sprite, in canvas px)
+    this.x = 600;
+    this.y = 570;
+
+    // Movement target
+    this.tx = 600;
+    this.ty = 570;
+    this.facingRight = false; // sprites face LEFT by default
+
+    // State
+    this.state     = null;
+    this.nextState = null;
+
+    // Animation
+    this.frameSeq  = [];
+    this.frameIdx  = 0;
+    this.frameTimer = 0;
+    this.frameDur  = 1;
+    this.isOneShot = false;
+    this.currentAnimator = animators.walk;
+
+    // State duration countdown
+    this.stateTimer = 0;
+
+    // Boot into IDLE
+    this._applyState(S.IDLE);
+    this.stateTimer = rand(2, 3); // brief pause before first action
+  }
+
+  // ── Depth perspective: cat smaller near horizon ──
+  depthScale() {
+    const t = clamp((this.y - 350) / (710 - 350), 0, 1);
+    return 0.45 + t * 0.55;
+  }
+
+  drawSize() {
+    const s = this.depthScale();
+    return { w: 120 * s, h: 110 * s };
+  }
+
+  // ── Apply a state immediately (internal, no transition logic) ──
+  _applyState(state, nextState = null) {
+    this.state      = state;
+    this.nextState  = nextState;
+    this.frameIdx   = 0;
+    this.frameTimer = 0;
+    this.frameSeq   = SEQ[state];
+    this.frameDur   = 1 / FPS[state];
+    this.isOneShot  = ONE_SHOT.has(state);
+    this.currentAnimator = this.anim[SHEET[state]];
+
+    if (!ONE_SHOT.has(state)) {
+      // Set how long this state lasts
+      switch (state) {
+        case S.IDLE:  this.stateTimer = rand(3, 8);  break;
+        case S.LOOK:  this.stateTimer = rand(4, 8);  break;
+        case S.GROOM: this.stateTimer = rand(5, 10); break;
+        case S.WALK:  this.stateTimer = 10;           break; // timeout
+        case S.RUN:   this.stateTimer = 5;            break; // timeout
+      }
+    } else {
+      this.stateTimer = 999; // managed by one-shot completion
+    }
+  }
+
+  // ── Called when a one-shot animation finishes ──
+  _oneShotDone() {
+    const next = this.nextState || S.IDLE;
+    this.nextState = null;
+    this._beginBehavior(next);
+  }
+
+  // ── Begin a behaviour with smooth transition awareness ──
+  _beginBehavior(target) {
+    const wasMoving     = MOVING.has(this.state);
+    const wasStationary = STATIONARY.has(this.state);
+    const wantMoving    = MOVING.has(target);
+    const wantStat      = STATIONARY.has(target);
+
+    // Moving → stationary: decelerate first
+    if (wasMoving && wantStat) {
+      this._applyState(S.STOPPING, target);
+      return;
+    }
+
+    // Stationary → moving: stand up first
+    if (wasStationary && wantMoving) {
+      this._applyState(S.RISING, target);
+      return;
+    }
+
+    // Direct switch (RUN↔WALK, LOOK↔GROOM, one-shot→target, etc.)
+    this._applyState(target);
+
+    // Pick a destination for movement states
+    if (target === S.WALK || target === S.RUN) {
+      const { tx, ty } = chooseWalkableTarget();
+      this.tx = tx;
+      this.ty = ty;
+      this.facingRight = tx > this.x;
+    }
+  }
+
+  // ── Random next behaviour selection ──
+  _chooseNext() {
+    const r = Math.random();
+    let next;
+    switch (this.state) {
+      case S.IDLE:
+        next = r < 0.40 ? S.WALK : r < 0.65 ? S.RUN : r < 0.85 ? S.GROOM : S.LOOK;
+        break;
+      case S.LOOK:
+        next = r < 0.50 ? S.IDLE : r < 0.80 ? S.WALK : S.GROOM;
+        break;
+      case S.GROOM:
+        next = r < 0.55 ? S.IDLE : r < 0.80 ? S.WALK : S.GROOM;
+        break;
+      case S.WALK:
+        next = r < 0.50 ? S.IDLE : r < 0.70 ? S.RUN : r < 0.90 ? S.WALK : S.GROOM;
+        break;
+      case S.RUN:
+        next = r < 0.60 ? S.IDLE : r < 0.80 ? S.WALK : S.RUN;
+        break;
+      default:
+        next = S.IDLE;
+    }
+    this._beginBehavior(next);
+  }
+
+  // ── Called when cat reaches walk/run destination ──
+  _arrive() {
+    this.stateTimer = 0.001; // fire _chooseNext on next update
+  }
+
+  // ── Move toward target, respecting obstacles ──
+  _move(dt) {
+    const dx   = this.tx - this.x;
+    const dy   = this.ty - this.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < 6) { this._arrive(); return; }
+
+    const spd  = SPEED[this.state] * (0.7 + 0.3 * this.depthScale());
+    const step = Math.min(spd * dt, dist);
+    const nx   = this.x + (dx / dist) * step;
+    const ny   = this.y + (dy / dist) * step;
+
+    if (!isObstacle(nx, ny)) {
+      this.x = nx;
+      this.y = ny;
+      this.facingRight = dx > 0;
+    } else {
+      // Blocked — stop and pick new goal
+      this._arrive();
+    }
+  }
+
+  // ── Main update ──
+  update(dt) {
+    // 1. Advance animation frame
+    this.frameTimer -= dt;
+    if (this.frameTimer <= 0) {
+      this.frameTimer = this.frameDur;
+      this.frameIdx++;
+      if (this.isOneShot && this.frameIdx >= this.frameSeq.length) {
+        this.frameIdx = this.frameSeq.length - 1; // hold last frame briefly
+        this._oneShotDone();
+        return;
+      }
+      this.frameIdx = this.frameIdx % this.frameSeq.length;
+    }
+
+    // 2. Move toward target if in a movement state
+    if (this.state === S.WALK || this.state === S.RUN) {
+      this._move(dt);
+    }
+
+    // 3. State timer countdown
+    if (!this.isOneShot) {
+      this.stateTimer -= dt;
+      if (this.stateTimer <= 0) {
+        this._chooseNext();
+      }
+    }
+  }
+
+  // ── Draw the cat sprite ──
+  draw(ctx) {
+    const { w, h } = this.drawSize();
+    const frameIdx  = this.frameSeq[this.frameIdx] ?? 0;
+    const destX     = this.x - w / 2;
+    const destY     = this.y - h;
+
+    // Subtle ground shadow for depth
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#3d2a10';
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y - 4, w * 0.38, 7 * this.depthScale(), 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Sprite: sprites face LEFT; flip when moving right
+    this.currentAnimator.draw(ctx, frameIdx, destX, destY, w, h, this.facingRight);
+  }
+}
+
+// ─────────────────────────────────────────
+// Image loading helper
+// ─────────────────────────────────────────
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload  = () => resolve(img);
+    img.onerror = () => reject(src);
+    img.src = src;
+  });
+}
+
+// ─────────────────────────────────────────
+// Main entry point
+// ─────────────────────────────────────────
+async function startGame() {
+  const canvas  = document.getElementById('gameCanvas');
+  const ctx     = canvas.getContext('2d');
+  const loading = document.getElementById('loadingScreen');
+  const loadMsg = document.getElementById('loadMsg');
+
+  let bgImg, runImg, walkImg, sitImg;
+  try {
+    [bgImg, runImg, walkImg, sitImg] = await Promise.all([
+      loadImage('bg.jpg'),
+      loadImage('run.jpg'),
+      loadImage('walk.jpg'),
+      loadImage('sit.jpg'),
+    ]);
+  } catch (failedSrc) {
+    loadMsg.textContent = `图片加载失败：${failedSrc}`;
+    loadMsg.style.color = '#ffcc44';
+    const hint = document.createElement('p');
+    hint.style.marginTop = '0.8em';
+    hint.style.fontSize  = '0.85em';
+    hint.textContent = '请将 bg.jpg / run.jpg / walk.jpg / sit.jpg 放入游戏目录后刷新';
+    loading.appendChild(hint);
+    return;
+  }
+
+  loading.classList.add('hidden');
+
+  const animators = {
+    run:  new SpriteAnimator(runImg),
+    walk: new SpriteAnimator(walkImg),
+    sit:  new SpriteAnimator(sitImg),
+  };
+
+  const cat = new Cat(animators);
+
+  let lastTime = 0;
+  function loop(ts) {
+    const dt = clamp((ts - lastTime) / 1000, 0, 0.1);
+    lastTime = ts;
+
+    // Background
+    ctx.drawImage(bgImg, 0, 0, W, H);
+
+    // Cat
+    cat.update(dt);
+    cat.draw(ctx);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('load', startGame);
+</script>
+</body>
+</html>
