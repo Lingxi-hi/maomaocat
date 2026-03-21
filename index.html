@@ -124,53 +124,97 @@ function removeBackground(img) {
 
   const data = id.data;
 
-  // A pixel counts as "background" if it is bright and nearly unsaturated
-  // (cream, off-white, light grey shadow under the cat's feet, etc.)
-  function isBg(i) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-    const sat = mx === 0 ? 0 : (mx - mn) / mx;
-    return mx > 185 && sat < 0.25;
+  // ── Sample the actual background colour from image corners ──────────
+  // This accounts for JPEG's warm-cream tint instead of assuming pure white.
+  const cornerOffsets = [
+    0,
+    (cw - 1) * 4,
+    (ch - 1) * cw * 4,
+    ((ch - 1) * cw + cw - 1) * 4,
+  ];
+  let bgR = 0, bgG = 0, bgB = 0;
+  for (const c of cornerOffsets) { bgR += data[c]; bgG += data[c+1]; bgB += data[c+2]; }
+  bgR = bgR / 4; bgG = bgG / 4; bgB = bgB / 4;
+
+  // ── Two-tier match ───────────────────────────────────────────────────
+  // • Strict:  colour distance from sampled bg  < 55   (core background)
+  // • Lenient: colour distance < 110 AND pixel is bright (JPEG fringe)
+  const STRICT  = 55  * 55;   // squared to avoid sqrt in hot loop
+  const LENIENT = 110 * 110;
+  function dist2(i) {
+    const dr = data[i] - bgR, dg = data[i+1] - bgG, db = data[i+2] - bgB;
+    return dr*dr + dg*dg + db*db;
+  }
+  function isBg(i, lenient = false) {
+    const d2 = dist2(i);
+    if (d2 < STRICT) return true;
+    if (lenient && d2 < LENIENT) {
+      // Only accept if pixel is also bright (avoids eating dark cat fur)
+      const br = (data[i] + data[i+1] + data[i+2]) / 3;
+      return br > 190;
+    }
+    return false;
   }
 
+  // ── BFS flood-fill from every border pixel ───────────────────────────
   const visited = new Uint8Array(cw * ch);
   const queue   = [];
 
-  // Seed from all four border edges
   for (let x = 0; x < cw; x++) {
     for (const y of [0, ch - 1]) {
       const p = y * cw + x;
-      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
+      if (!visited[p] && isBg(p * 4, true)) { visited[p] = 1; queue.push(p); }
     }
   }
   for (let y = 1; y < ch - 1; y++) {
     for (const x of [0, cw - 1]) {
       const p = y * cw + x;
-      if (!visited[p] && isBg(p * 4)) { visited[p] = 1; queue.push(p); }
+      if (!visited[p] && isBg(p * 4, true)) { visited[p] = 1; queue.push(p); }
     }
   }
 
-  // BFS — remove every reachable background pixel
   let qi = 0;
   while (qi < queue.length) {
     const p = queue[qi++];
-    data[p * 4 + 3] = 0;                 // fully transparent
+    data[p * 4 + 3] = 0;                       // fully transparent
     const px = p % cw, py = (p / cw) | 0;
-    const neighbors = [
+    const nbrs = [
       py > 0    ? p - cw : -1,
       py < ch-1 ? p + cw : -1,
       px > 0    ? p - 1  : -1,
       px < cw-1 ? p + 1  : -1,
     ];
-    for (const n of neighbors) {
-      if (n >= 0 && !visited[n] && isBg(n * 4)) {
+    for (const n of nbrs) {
+      if (n >= 0 && !visited[n] && isBg(n * 4, true)) {
         visited[n] = 1; queue.push(n);
       }
     }
   }
 
+  // ── Edge feathering pass ─────────────────────────────────────────────
+  // Any opaque pixel that borders a transparent pixel and is "nearish"
+  // to the background colour gets its alpha faded proportionally.
+  // This removes the anti-aliased halo JPEG leaves around objects.
+  const FEATHER_D2 = 160 * 160;
+  for (let p = 0; p < cw * ch; p++) {
+    if (data[p * 4 + 3] === 0) continue;       // already transparent
+    const px = p % cw, py = (p / cw) | 0;
+    let nearTransp = false;
+    if (py > 0    && data[(p - cw) * 4 + 3] === 0) nearTransp = true;
+    if (py < ch-1 && data[(p + cw) * 4 + 3] === 0) nearTransp = true;
+    if (px > 0    && data[(p - 1)  * 4 + 3] === 0) nearTransp = true;
+    if (px < cw-1 && data[(p + 1)  * 4 + 3] === 0) nearTransp = true;
+    if (!nearTransp) continue;
+    const d2 = dist2(p * 4);
+    if (d2 < FEATHER_D2) {
+      // Closer to bg colour → more transparent
+      const t = 1 - Math.sqrt(d2) / Math.sqrt(FEATHER_D2);
+      data[p * 4 + 3] = Math.round((1 - t) * 255);
+    }
+  }
+
   cx.putImageData(id, 0, 0);
-  return off; // HTMLCanvasElement — usable with drawImage
+  return off;
 }
 
 // ─────────────────────────────────────────
@@ -492,8 +536,15 @@ class Cat {
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    img.crossOrigin = 'anonymous'; // allow getImageData after canvas draw (same-origin safe)
     img.onload  = () => resolve(img);
-    img.onerror = () => reject(src);
+    img.onerror = () => {
+      // Retry without crossOrigin (some servers reject CORS preflight)
+      const img2 = new Image();
+      img2.onload  = () => resolve(img2);
+      img2.onerror = () => reject(src);
+      img2.src = src;
+    };
     img.src = src;
   });
 }
