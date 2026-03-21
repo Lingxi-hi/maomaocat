@@ -139,15 +139,27 @@ function removeBackground(img) {
     return off;
   }
 
-  // ── Case 2: solid background — BFS flood-fill from borders ──────────
-  // Sample background colour from the top-left corner pixel.
-  // PNG is lossless so all bg pixels should be very close to this value.
-  const bgR = data[0], bgG = data[1], bgB = data[2];
-  const THRESH = 40 * 40; // PNG anti-aliased edges can drift up to ~40 units
+  // ── Case 2: solid or checkerboard background — BFS flood-fill ───────
+  // Sample primary bg color from top-left corner, then scan top edge for
+  // a second distinct color (handles two-tone checkerboard backgrounds).
+  const bgR1 = data[0], bgG1 = data[1], bgB1 = data[2];
+  const THRESH = 35 * 35;
+
+  let bgR2 = bgR1, bgG2 = bgG1, bgB2 = bgB1;
+  for (let x = 1; x < cw; x++) {
+    const i = x * 4;
+    const dr = data[i]-bgR1, dg = data[i+1]-bgG1, db = data[i+2]-bgB1;
+    if (dr*dr + dg*dg + db*db > THRESH) {
+      bgR2 = data[i]; bgG2 = data[i+1]; bgB2 = data[i+2];
+      break;
+    }
+  }
 
   function isBg(i) {
-    const dr = data[i]-bgR, dg = data[i+1]-bgG, db = data[i+2]-bgB;
-    return dr*dr + dg*dg + db*db < THRESH;
+    const r = data[i], g = data[i+1], b = data[i+2];
+    const d1 = (r-bgR1)**2 + (g-bgG1)**2 + (b-bgB1)**2;
+    const d2 = (r-bgR2)**2 + (g-bgG2)**2 + (b-bgB2)**2;
+    return d1 <= THRESH || d2 <= THRESH;
   }
 
   const visited = new Uint8Array(cw * ch);
@@ -560,9 +572,9 @@ async function startGame() {
   loading.classList.add('hidden');
 
   const animators = {
-    run:  new SpriteAnimator(runImg),
-    walk: new SpriteAnimator(walkImg),
-    sit:  new SpriteAnimator(sitImg),
+    run:  new SpriteAnimator(removeBackground(runImg)),
+    walk: new SpriteAnimator(removeBackground(walkImg)),
+    sit:  new SpriteAnimator(removeBackground(sitImg)),
   };
 
   const cat = new Cat(animators);
