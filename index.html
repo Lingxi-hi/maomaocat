@@ -99,8 +99,10 @@ function chooseWalkableTarget() {
 }
 
 // ─────────────────────────────────────────
-// removeBackground — uses k-means(k=2) on ALL border pixels to correctly
-// identify both checker colors, then single global BFS to erase them.
+// removeBackground — histogram-based checker color detection + 3-pass BFS.
+// Pass 1: global BFS from outer sheet edges.
+// Pass 2: per-frame BFS (catches background isolated by cat bodies).
+// Pass 3: BFS from ALL transparent pixels (catches any remaining pockets).
 // ─────────────────────────────────────────
 function removeBackground(img) {
   const cw = img.naturalWidth ?? img.width;
@@ -116,39 +118,38 @@ function removeBackground(img) {
 
   // ── Collect every opaque border pixel ────────────────────────────────
   const bp = [];
-  const push = (x, y) => {
+  const addPx = (x, y) => {
     const i = (y*cw+x)*4;
     if (data[i+3] > 200) bp.push([data[i], data[i+1], data[i+2]]);
   };
-  for (let x = 0; x < cw; x++) { push(x, 0); push(x, ch-1); }
-  for (let y = 1; y < ch-1; y++) { push(0, y); push(cw-1, y); }
+  for (let x = 0; x < cw; x++) { addPx(x, 0); addPx(x, ch-1); }
+  for (let y = 1; y < ch-1; y++) { addPx(0, y); addPx(cw-1, y); }
 
-  // If most border pixels are already transparent → image is transparent
+  // If most border pixels are already transparent → image already has alpha
   if (bp.length < (2*cw + 2*(ch-2)) * 0.4) return off;
 
-  // ── K-means k=2, 4 iterations ────────────────────────────────────────
-  // c1 = first border pixel; c2 = border pixel most distant from c1
-  let c1 = bp[0].slice();
-  let c2 = bp.reduce((best, c) => {
-    const d  = (c[0]-c1[0])**2 + (c[1]-c1[1])**2 + (c[2]-c1[2])**2;
-    const db = (best[0]-c1[0])**2 + (best[1]-c1[1])**2 + (best[2]-c1[2])**2;
-    return d > db ? c.slice() : best;
-  }, c1.slice());
-
-  for (let iter = 0; iter < 4; iter++) {
-    const s1 = [0,0,0,0], s2 = [0,0,0,0];
-    for (const [r,g,b] of bp) {
-      const d1 = (r-c1[0])**2 + (g-c1[1])**2 + (b-c1[2])**2;
-      const d2 = (r-c2[0])**2 + (g-c2[1])**2 + (b-c2[2])**2;
-      const s  = d1 <= d2 ? s1 : s2;
-      s[0]+=r; s[1]+=g; s[2]+=b; s[3]++;
-    }
-    if (s1[3]) c1 = [s1[0]/s1[3]|0, s1[1]/s1[3]|0, s1[2]/s1[3]|0];
-    if (s2[3]) c2 = [s2[0]/s2[3]|0, s2[1]/s2[3]|0, s2[2]/s2[3]|0];
+  // ── Histogram color detection (4-bit/channel quantization) ───────────
+  // The checker pattern dominates border pixels; cat colors are scattered.
+  // Picking the two most frequent bins robustly identifies both checker colors
+  // even when some cat pixels appear on the sprite sheet border.
+  const hist = new Map();
+  for (const [r,g,b] of bp) {
+    const k = ((r>>4)<<8)|((g>>4)<<4)|(b>>4);
+    const e = hist.get(k);
+    if (e) { e[0]+=r; e[1]+=g; e[2]+=b; e[3]++; }
+    else hist.set(k, [r, g, b, 1]);
   }
-
-  const dist12 = (c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c1[2]-c2[2])**2;
-  const bgColors = dist12 > 15*15 ? [c1, c2] : [c1];
+  const bins = [...hist.values()].sort((a, b) => b[3] - a[3]);
+  const avg  = b => [b[0]/b[3]|0, b[1]/b[3]|0, b[2]/b[3]|0];
+  const bg1  = avg(bins[0]);
+  let   bg2  = null;
+  for (let i = 1; i < bins.length; i++) {
+    const c = avg(bins[i]);
+    if ((c[0]-bg1[0])**2 + (c[1]-bg1[1])**2 + (c[2]-bg1[2])**2 > 25*25) {
+      bg2 = c; break;
+    }
+  }
+  const bgColors = bg2 ? [bg1, bg2] : [bg1];
   console.log('[BG] detected:', bgColors.map(c => `rgb(${c})`).join(' + '));
 
   const REMOVE = 22 * 22;
@@ -158,9 +159,8 @@ function removeBackground(img) {
     return bgColors.some(([br,bg_,bb]) => (r-br)**2 + (g-bg_)**2 + (b-bb)**2 <= REMOVE);
   };
 
-  // ── Pass 1: global BFS from the 4 outer sheet edges ──────────────────
-  // Removes background reachable from outside; clears inter-frame corridors.
-  {
+  // ── Generic BFS helper ────────────────────────────────────────────────
+  const bfs = (seedFn) => {
     const vis = new Uint8Array(cw * ch), q = [];
     const seed = (gx, gy) => {
       if (gx < 0 || gx >= cw || gy < 0 || gy >= ch) return;
@@ -168,40 +168,53 @@ function removeBackground(img) {
       if (vis[p] || !isBg(p*4)) return;
       vis[p] = 1; q.push(gx, gy);
     };
-    for (let x = 0; x < cw; x++) { seed(x, 0); seed(x, ch-1); }
-    for (let y = 1; y < ch-1; y++) { seed(0, y); seed(cw-1, y); }
+    seedFn(seed);
     for (let qi = 0; qi < q.length; ) {
       const gx = q[qi++], gy = q[qi++];
       data[(gy*cw+gx)*4+3] = 0;
       seed(gx-1, gy); seed(gx+1, gy); seed(gx, gy-1); seed(gx, gy+1);
     }
-  }
+  };
+
+  // ── Pass 1: global BFS from the 4 outer sheet edges ──────────────────
+  bfs(seed => {
+    for (let x = 0; x < cw; x++) { seed(x, 0); seed(x, ch-1); }
+    for (let y = 1; y < ch-1; y++) { seed(0, y); seed(cw-1, y); }
+  });
 
   // ── Pass 2: per-frame BFS ─────────────────────────────────────────────
-  // Seeds from each frame's own 4 edges.  After pass 1, many edge pixels
-  // are now transparent (alpha=0); isBg returns true for them, so they
-  // act as additional seeds that let the BFS reach background pockets
+  // Seeds from each frame's own 4 edges.  After pass 1, transparent pixels
+  // along inter-frame borders act as extra seeds, letting BFS reach pockets
   // that were blocked by cat bodies in neighbouring frames.
   const fw = (cw / 4) | 0, fh = (ch / 4) | 0;
   for (let row = 0; row < 4; row++) {
     for (let col = 0; col < 4; col++) {
       const x0 = col*fw, y0 = row*fh, x1 = x0+fw, y1 = y0+fh;
-      const vis = new Uint8Array(fw * fh), q = [];
-      const seed = (gx, gy) => {
+      const lvis = new Uint8Array(fw * fh), lq = [];
+      const lseed = (gx, gy) => {
         if (gx < x0 || gx >= x1 || gy < y0 || gy >= y1) return;
         const lp = (gy-y0)*fw + (gx-x0);
-        if (vis[lp] || !isBg((gy*cw+gx)*4)) return;
-        vis[lp] = 1; q.push(gx, gy);
+        if (lvis[lp] || !isBg((gy*cw+gx)*4)) return;
+        lvis[lp] = 1; lq.push(gx, gy);
       };
-      for (let x = x0; x < x1; x++) { seed(x, y0); seed(x, y1-1); }
-      for (let y = y0+1; y < y1-1; y++) { seed(x0, y); seed(x1-1, y); }
-      for (let qi = 0; qi < q.length; ) {
-        const gx = q[qi++], gy = q[qi++];
+      for (let x = x0; x < x1; x++) { lseed(x, y0); lseed(x, y1-1); }
+      for (let y = y0+1; y < y1-1; y++) { lseed(x0, y); lseed(x1-1, y); }
+      for (let qi = 0; qi < lq.length; ) {
+        const gx = lq[qi++], gy = lq[qi++];
         data[(gy*cw+gx)*4+3] = 0;
-        seed(gx-1, gy); seed(gx+1, gy); seed(gx, gy-1); seed(gx, gy+1);
+        lseed(gx-1, gy); lseed(gx+1, gy); lseed(gx, gy-1); lseed(gx, gy+1);
       }
     }
   }
+
+  // ── Pass 3: expand from ALL transparent pixels ────────────────────────
+  // Catches any remaining background pockets missed by passes 1 & 2
+  // (e.g. frames where cat body touches all 4 frame edges).
+  bfs(seed => {
+    for (let y = 0; y < ch; y++)
+      for (let x = 0; x < cw; x++)
+        if (data[(y*cw+x)*4+3] === 0) seed(x, y);
+  });
 
   cx.putImageData(id, 0, 0);
   return off;
@@ -351,9 +364,9 @@ class Cat {
     this.state      = state;
     this.nextState  = nextState;
     this.frameIdx   = 0;
-    this.frameTimer = 0;
     this.frameSeq   = SEQ[state];
     this.frameDur   = 1 / FPS[state];
+    this.frameTimer = this.frameDur; // start at full duration so frame 0 shows first
     this.isOneShot  = ONE_SHOT.has(state);
     this.currentAnimator = this.anim[SHEET[state]];
 
