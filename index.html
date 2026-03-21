@@ -314,6 +314,26 @@ class SpriteAnimator {
 }
 
 // ─────────────────────────────────────────
+// Stone/rock jump spots — positions the cat
+// can leap onto (canvas pixel coordinates)
+// ─────────────────────────────────────────
+const STONE_SPOTS = [
+  { x: 330, y: 560, h: 28 },  // stone left of path
+  { x: 530, y: 535, h: 22 },  // center-left path stone
+  { x: 740, y: 545, h: 24 },  // center-right path stone
+  { x: 960, y: 560, h: 20 },  // right path stone
+];
+
+function nearestStone(x, y) {
+  let best = null, bestDist = Infinity;
+  for (const s of STONE_SPOTS) {
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return { stone: best, dist: bestDist };
+}
+
+// ─────────────────────────────────────────
 // Cat State Machine
 // ─────────────────────────────────────────
 const S = {
@@ -324,6 +344,7 @@ const S = {
   RUN:      'RUN',      // running to target
   STOPPING: 'STOPPING', // one-shot: walk frames reversed
   RISING:   'RISING',   // one-shot: stand up from sit
+  JUMP:     'JUMP',     // one-shot: leap onto a stone
 };
 
 // Frame sequences per state
@@ -335,6 +356,7 @@ const SEQ = {
   RUN:      [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
   STOPPING: [7,6,5,4,3,2,1,0],
   RISING:   [0,1,2,3,4],
+  JUMP:     [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
 };
 
 // Which sprite sheet each state uses (key into animators object)
@@ -346,6 +368,7 @@ const SHEET = {
   RUN:      'run',
   STOPPING: 'walk',
   RISING:   'walk',
+  JUMP:     'jump',
 };
 
 // Animation speed (frames per second) per state
@@ -357,16 +380,17 @@ const FPS = {
   RUN:      12,
   STOPPING: 6,
   RISING:   5,
+  JUMP:     9,
 };
 
 // Movement speed (px/s) per state
 const SPEED = {
   IDLE: 0, LOOK: 0, GROOM: 0,
-  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0,
+  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0, JUMP: 0,
 };
 
 // One-shot states complete then hand off to nextState
-const ONE_SHOT = new Set([S.STOPPING, S.RISING]);
+const ONE_SHOT = new Set([S.STOPPING, S.RISING, S.JUMP]);
 
 // ───────── stationary / moving sets for transition logic ─────────
 const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM]);
@@ -399,6 +423,16 @@ class Cat {
 
     // State duration countdown
     this.stateTimer = 0;
+
+    // Jump arc tracking
+    this.jumpStartX   = 0;
+    this.jumpStartY   = 0;
+    this.jumpEndX     = 0;
+    this.jumpEndY     = 0;
+    this.jumpArcH     = 0;   // peak arc height in px
+    this.jumpArcT     = 0;   // 0→1 normalised jump progress
+    this.jumpShadowY  = 0;   // ground Y for shadow during jump
+    this.onStoneH     = 0;   // visual lift when resting on stone
 
     // Boot into IDLE
     this._applyState(S.IDLE);
@@ -435,6 +469,7 @@ class Cat {
         case S.GROOM: this.stateTimer = rand(8, 16); break;
         case S.WALK:  this.stateTimer = 15;           break; // timeout
         case S.RUN:   this.stateTimer = 8;            break; // timeout
+        case S.JUMP:  this.stateTimer = 999;          break; // managed by one-shot
       }
     } else {
       this.stateTimer = 999; // managed by one-shot completion
@@ -450,6 +485,13 @@ class Cat {
 
   // ── Begin a behaviour with smooth transition awareness ──
   _beginBehavior(target) {
+    // JUMP is handled separately via _beginJump
+    if (target === S.JUMP) {
+      const { stone } = nearestStone(this.x, this.y);
+      if (stone) { this._beginJump(stone); return; }
+      target = S.IDLE; // fallback if no stone found
+    }
+
     const wasMoving     = MOVING.has(this.state);
     const wasStationary = STATIONARY.has(this.state);
     const wantMoving    = MOVING.has(target);
@@ -463,6 +505,7 @@ class Cat {
 
     // Stationary → moving: pre-choose target so RISING faces correct direction
     if (wasStationary && wantMoving) {
+      this.onStoneH = 0; // step off stone when walking away
       const { tx, ty } = chooseWalkableTarget();
       this.tx = tx;
       this.ty = ty;
@@ -490,18 +533,26 @@ class Cat {
   _chooseNext() {
     const r = Math.random();
     let next;
+
+    // Check if near a stone to potentially jump (15% chance when nearby)
+    const { dist } = nearestStone(this.x, this.y);
+    const canJump = dist < 280 && Math.random() < 0.15;
+
     switch (this.state) {
       case S.IDLE:
-        next = r < 0.30 ? S.WALK : r < 0.40 ? S.RUN : r < 0.65 ? S.LOOK : S.GROOM;
+        next = canJump ? S.JUMP :
+               r < 0.30 ? S.WALK : r < 0.40 ? S.RUN : r < 0.65 ? S.LOOK : S.GROOM;
         break;
       case S.LOOK:
-        next = r < 0.55 ? S.IDLE : r < 0.75 ? S.GROOM : S.WALK;
+        next = canJump ? S.JUMP :
+               r < 0.55 ? S.IDLE : r < 0.75 ? S.GROOM : S.WALK;
         break;
       case S.GROOM:
         next = r < 0.60 ? S.IDLE : r < 0.80 ? S.LOOK : S.WALK;
         break;
       case S.WALK:
-        next = r < 0.55 ? S.IDLE : r < 0.70 ? S.LOOK : r < 0.85 ? S.GROOM : S.RUN;
+        next = canJump ? S.JUMP :
+               r < 0.55 ? S.IDLE : r < 0.70 ? S.LOOK : r < 0.85 ? S.GROOM : S.RUN;
         break;
       case S.RUN:
         next = r < 0.70 ? S.IDLE : r < 0.85 ? S.WALK : S.LOOK;
@@ -510,6 +561,20 @@ class Cat {
         next = S.IDLE;
     }
     this._beginBehavior(next);
+  }
+
+  // ── Begin a jump toward a stone spot ──
+  _beginJump(stone) {
+    this.jumpStartX  = this.x;
+    this.jumpStartY  = this.y;
+    this.jumpEndX    = stone.x;
+    this.jumpEndY    = stone.y;
+    this.jumpArcH    = 60 + Math.abs(stone.y - this.y) * 0.4;
+    this.jumpArcT    = 0;
+    this.jumpShadowY = this.y;         // shadow stays near start ground
+    this.facingRight = stone.x > this.x;
+    this.onStoneH    = stone.h;        // how high the cat sits on the stone
+    this._applyState(S.JUMP, S.IDLE);
   }
 
   // ── Called when cat reaches walk/run destination ──
@@ -560,6 +625,14 @@ class Cat {
       this._move(dt);
     }
 
+    // 2b. Interpolate position during jump arc
+    if (this.state === S.JUMP) {
+      const total = this.frameSeq.length;
+      this.jumpArcT = Math.min(this.frameIdx / (total - 1), 1);
+      this.x = this.jumpStartX + (this.jumpEndX - this.jumpStartX) * this.jumpArcT;
+      this.y = this.jumpStartY + (this.jumpEndY - this.jumpStartY) * this.jumpArcT;
+    }
+
     // 3. State timer countdown
     if (!this.isOneShot) {
       this.stateTimer -= dt;
@@ -572,16 +645,35 @@ class Cat {
   // ── Draw the cat sprite ──
   draw(ctx) {
     const { w, h } = this.drawSize();
-    const frameIdx  = this.frameSeq[this.frameIdx] ?? 0;
-    const destX     = this.x - w / 2;
-    const destY     = this.y - h;
+    const frameIdx = this.frameSeq[this.frameIdx] ?? 0;
 
-    // Subtle ground shadow for depth
+    // Arc offset: sinusoidal peak at mid-jump
+    let arcOff = 0;
+    if (this.state === S.JUMP) {
+      arcOff = Math.sin(this.jumpArcT * Math.PI) * this.jumpArcH;
+    }
+
+    // Stone elevation when resting (after jump landing)
+    const stoneOff = (this.state !== S.JUMP) ? this.onStoneH : 0;
+
+    const destX = this.x - w / 2;
+    const destY = this.y - h - arcOff - stoneOff;
+
+    // Shadow — stays on ground, shrinks / fades mid-air
+    const shadowAlpha = this.state === S.JUMP
+      ? 0.25 * (1 - Math.sin(this.jumpArcT * Math.PI) * 0.7)
+      : 0.25;
+    const shadowSY = this.state === S.JUMP
+      ? this.jumpShadowY - 4
+      : this.y - 4;
+    const shadowSX = this.state === S.JUMP
+      ? this.jumpStartX + (this.jumpEndX - this.jumpStartX) * this.jumpArcT
+      : this.x;
     ctx.save();
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha = shadowAlpha;
     ctx.fillStyle = '#3d2a10';
     ctx.beginPath();
-    ctx.ellipse(this.x, this.y - 4, w * 0.38, 7 * this.depthScale(), 0, 0, Math.PI * 2);
+    ctx.ellipse(shadowSX, shadowSY, w * 0.38, 7 * this.depthScale(), 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
@@ -646,13 +738,14 @@ async function startGame() {
   const loading = document.getElementById('loadingScreen');
   const loadMsg = document.getElementById('loadMsg');
 
-  let bgImg, runImg, walkImg, sitImg;
+  let bgImg, runImg, walkImg, sitImg, jumpImg;
   try {
-    [bgImg, runImg, walkImg, sitImg] = await Promise.all([
+    [bgImg, runImg, walkImg, sitImg, jumpImg] = await Promise.all([
       loadImage('bg.png'),
       loadImage('run.png'),
       loadImage('walk.png'),
       loadImage('sit.png'),
+      loadImage('jump.png'),
     ]);
   } catch (failedSrc) {
     loadMsg.textContent = `图片加载失败：${failedSrc}`;
@@ -660,7 +753,7 @@ async function startGame() {
     const hint = document.createElement('p');
     hint.style.marginTop = '0.8em';
     hint.style.fontSize  = '0.85em';
-    hint.textContent = '请将 bg.png / run.png / walk.png / sit.png 放入游戏目录后刷新';
+    hint.textContent = '请将 bg.png / run.png / walk.png / sit.png / jump.png 放入游戏目录后刷新';
     loading.appendChild(hint);
     return;
   }
@@ -671,6 +764,7 @@ async function startGame() {
     run:  new SpriteAnimator(removeBackground(runImg)),
     walk: new SpriteAnimator(removeBackground(walkImg)),
     sit:  new SpriteAnimator(removeBackground(sitImg)),
+    jump: new SpriteAnimator(removeBackground(jumpImg)),
   };
 
   const cat = new Cat(animators);
