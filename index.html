@@ -116,9 +116,10 @@ function removeBackground(img) {
   try {
     id = cx.getImageData(0, 0, cw, ch);
   } catch (e) {
-    // CORS / file:// restriction — tainted canvas; fall back to original image element
-    // (returning the tainted canvas would crash drawImage on the main canvas too)
-    console.warn('removeBackground: getImageData blocked, cat will have white bg.', e);
+    // CORS / file:// restriction — tainted canvas; fall back to original image element.
+    // Mark it so SpriteAnimator can use multiply blend to hide the white background.
+    console.warn('removeBackground: getImageData blocked, using blend fallback.', e);
+    img._blendFallback = true;
     return img;
   }
 
@@ -240,6 +241,10 @@ class SpriteAnimator {
     const sy  = row * this.frameH;
 
     ctx.save();
+    // multiply blend: white × bg = bg (white vanishes), fur × bg = slightly darker
+    // Used when getImageData was blocked (file:// or missing CORS) so we couldn't
+    // do proper pixel-level background removal.
+    if (this.img._blendFallback) ctx.globalCompositeOperation = 'multiply';
     if (flipH) {
       ctx.translate(destX + destW, destY);
       ctx.scale(-1, 1);
@@ -533,20 +538,32 @@ class Cat {
 // ─────────────────────────────────────────
 // Image loading helper
 // ─────────────────────────────────────────
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous'; // allow getImageData after canvas draw (same-origin safe)
-    img.onload  = () => resolve(img);
-    img.onerror = () => {
-      // Retry without crossOrigin (some servers reject CORS preflight)
-      const img2 = new Image();
-      img2.onload  = () => resolve(img2);
-      img2.onerror = () => reject(src);
-      img2.src = src;
-    };
-    img.src = src;
-  });
+async function loadImage(src) {
+  // Load via fetch → Blob → objectURL so the image never taints the canvas,
+  // allowing getImageData() to work regardless of server CORS configuration.
+  try {
+    const resp = await fetch(src);
+    if (!resp.ok) throw new Error(resp.status);
+    const blob   = await resp.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload  = () => { URL.revokeObjectURL(blobUrl); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(src); };
+      img.src = blobUrl;
+    });
+  } catch (_) {
+    // Fallback for file:// protocol or network errors.
+    // The canvas will be tainted → removeBackground marks _blendFallback
+    // and SpriteAnimator uses multiply blend to hide white pixels visually.
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img._blendFallback = true;
+      img.onload  = () => resolve(img);
+      img.onerror = () => reject(src);
+      img.src = src;
+    });
+  }
 }
 
 // ─────────────────────────────────────────
