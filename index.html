@@ -511,30 +511,47 @@ class Cat {
 // Image loading helper
 // ─────────────────────────────────────────
 async function loadImage(src) {
-  // Load via fetch → Blob → objectURL so the image never taints the canvas,
-  // allowing getImageData() to work regardless of server CORS configuration.
+  // Strategy 1: fetch → Blob → objectURL (blob URLs are always same-origin,
+  // so the canvas is never tainted and getImageData() always works).
   try {
+    console.log(`[IMG] fetching ${src}`);
     const resp = await fetch(src);
-    if (!resp.ok) throw new Error(resp.status);
-    const blob   = await resp.blob();
+    console.log(`[IMG] fetch ${src} → ${resp.status} ok=${resp.ok}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob    = await resp.blob();
+    console.log(`[IMG] blob ${src}: ${blob.size}B type=${blob.type}`);
     const blobUrl = URL.createObjectURL(blob);
     return await new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload  = () => { URL.revokeObjectURL(blobUrl); resolve(img); };
-      img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(src); };
+      img.onload  = () => { URL.revokeObjectURL(blobUrl); console.log(`[IMG] ✓ blob loaded ${src}`); resolve(img); };
+      img.onerror = (e) => { URL.revokeObjectURL(blobUrl); console.error(`[IMG] ✗ blob onerror ${src}`, e); reject(new Error('blob-onerror')); };
       img.src = blobUrl;
     });
-  } catch (_) {
-    // Fallback for file:// protocol or network errors.
-    // Canvas will be tainted so getImageData fails → cat gets white rectangle,
-    // but at least colours are correct (better than ghostly multiply effect).
-    return new Promise((resolve, reject) => {
+  } catch (err) {
+    console.warn(`[IMG] fetch/blob failed for ${src}: ${err.message} → trying crossOrigin fallback`);
+  }
+
+  // Strategy 2: direct load with crossOrigin=anonymous (works when server
+  // sends CORS headers; canvas is NOT tainted).
+  try {
+    return await new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload  = () => resolve(img);
-      img.onerror = () => reject(src);
+      img.crossOrigin = 'anonymous';
+      img.onload  = () => { console.log(`[IMG] ✓ crossOrigin loaded ${src}`); resolve(img); };
+      img.onerror = () => reject(new Error('cors-onerror'));
       img.src = src;
     });
+  } catch (err) {
+    console.warn(`[IMG] crossOrigin failed for ${src}: ${err.message} → plain fallback (canvas WILL be tainted)`);
   }
+
+  // Strategy 3: plain load — canvas will be tainted, getImageData blocked.
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload  = () => { console.log(`[IMG] ✓ plain loaded ${src} (canvas tainted)`); resolve(img); };
+    img.onerror = () => reject(src);
+    img.src = src;
+  });
 }
 
 // ─────────────────────────────────────────
