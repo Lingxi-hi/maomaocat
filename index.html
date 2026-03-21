@@ -71,14 +71,17 @@ const W = 1200, H = 750;
 // Tuned to the watercolor garden background
 // ─────────────────────────────────────────
 const OBSTACLE_PCT = [
-  { id: 'pond',        x1: 0.00, y1: 0.58, x2: 0.18, y2: 1.00 },
-  { id: 'house',       x1: 0.60, y1: 0.27, x2: 0.83, y2: 0.70 },
-  { id: 'stone_wall',  x1: 0.00, y1: 0.03, x2: 0.52, y2: 0.35 },
-  { id: 'fence',       x1: 0.37, y1: 0.03, x2: 0.67, y2: 0.33 },
-  { id: 'left_tree',   x1: 0.00, y1: 0.00, x2: 0.10, y2: 0.60 },
-  { id: 'right_tree',  x1: 0.84, y1: 0.00, x2: 1.00, y2: 0.65 },
-  { id: 'bench',       x1: 0.13, y1: 0.29, x2: 0.41, y2: 0.53 },
-  { id: 'sign',        x1: 0.73, y1: 0.41, x2: 0.85, y2: 0.63 },
+  { id: 'pond',        x1: 0.00, y1: 0.55, x2: 0.22, y2: 1.00 },
+  { id: 'house',       x1: 0.58, y1: 0.25, x2: 0.85, y2: 0.72 },
+  { id: 'stone_wall',  x1: 0.00, y1: 0.00, x2: 0.55, y2: 0.38 },
+  { id: 'fence',       x1: 0.35, y1: 0.00, x2: 0.70, y2: 0.36 },
+  { id: 'left_tree',   x1: 0.00, y1: 0.00, x2: 0.12, y2: 0.58 },
+  { id: 'right_tree',  x1: 0.82, y1: 0.00, x2: 1.00, y2: 0.68 },
+  { id: 'bench',       x1: 0.12, y1: 0.27, x2: 0.43, y2: 0.55 },
+  { id: 'sign',        x1: 0.71, y1: 0.39, x2: 0.87, y2: 0.65 },
+  { id: 'flowers_l',   x1: 0.00, y1: 0.82, x2: 0.15, y2: 1.00 },
+  { id: 'flowers_r',   x1: 0.85, y1: 0.75, x2: 1.00, y2: 1.00 },
+  { id: 'top_area',    x1: 0.00, y1: 0.00, x2: 1.00, y2: 0.42 },
 ];
 
 const OBSTACLES = OBSTACLE_PCT.map(o => ({
@@ -94,8 +97,8 @@ function isObstacle(x, y) {
 // Cat wanders mainly in the grass/path foreground
 function chooseWalkableTarget() {
   for (let i = 0; i < 50; i++) {
-    const tx = rand(80, 1120);
-    const ty = rand(370, 710);
+    const tx = rand(120, 1050);
+    const ty = rand(440, 700);
     if (!isObstacle(tx, ty)) return { tx, ty };
   }
   return { tx: 600, ty: 570 }; // safe fallback on path centre
@@ -347,19 +350,19 @@ const SHEET = {
 
 // Animation speed (frames per second) per state
 const FPS = {
-  IDLE:     1.5,
-  LOOK:     3.5,
-  GROOM:    3.5,
-  WALK:     10,
-  RUN:      18,
-  STOPPING: 10,
-  RISING:   8,
+  IDLE:     1.2,
+  LOOK:     2.5,
+  GROOM:    2.5,
+  WALK:     6,
+  RUN:      12,
+  STOPPING: 6,
+  RISING:   5,
 };
 
 // Movement speed (px/s) per state
 const SPEED = {
   IDLE: 0, LOOK: 0, GROOM: 0,
-  WALK: 80, RUN: 210, STOPPING: 0, RISING: 0,
+  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0,
 };
 
 // One-shot states complete then hand off to nextState
@@ -427,11 +430,11 @@ class Cat {
     if (!ONE_SHOT.has(state)) {
       // Set how long this state lasts
       switch (state) {
-        case S.IDLE:  this.stateTimer = rand(3, 8);  break;
-        case S.LOOK:  this.stateTimer = rand(4, 8);  break;
-        case S.GROOM: this.stateTimer = rand(5, 10); break;
-        case S.WALK:  this.stateTimer = 10;           break; // timeout
-        case S.RUN:   this.stateTimer = 5;            break; // timeout
+        case S.IDLE:  this.stateTimer = rand(5, 14);  break;
+        case S.LOOK:  this.stateTimer = rand(6, 12);  break;
+        case S.GROOM: this.stateTimer = rand(8, 16); break;
+        case S.WALK:  this.stateTimer = 15;           break; // timeout
+        case S.RUN:   this.stateTimer = 8;            break; // timeout
       }
     } else {
       this.stateTimer = 999; // managed by one-shot completion
@@ -489,19 +492,19 @@ class Cat {
     let next;
     switch (this.state) {
       case S.IDLE:
-        next = r < 0.40 ? S.WALK : r < 0.65 ? S.RUN : r < 0.85 ? S.GROOM : S.LOOK;
+        next = r < 0.30 ? S.WALK : r < 0.40 ? S.RUN : r < 0.65 ? S.LOOK : S.GROOM;
         break;
       case S.LOOK:
-        next = r < 0.50 ? S.IDLE : r < 0.80 ? S.WALK : S.GROOM;
+        next = r < 0.55 ? S.IDLE : r < 0.75 ? S.GROOM : S.WALK;
         break;
       case S.GROOM:
-        next = r < 0.55 ? S.IDLE : r < 0.80 ? S.WALK : S.GROOM;
+        next = r < 0.60 ? S.IDLE : r < 0.80 ? S.LOOK : S.WALK;
         break;
       case S.WALK:
-        next = r < 0.50 ? S.IDLE : r < 0.70 ? S.RUN : r < 0.90 ? S.WALK : S.GROOM;
+        next = r < 0.55 ? S.IDLE : r < 0.70 ? S.LOOK : r < 0.85 ? S.GROOM : S.RUN;
         break;
       case S.RUN:
-        next = r < 0.60 ? S.IDLE : r < 0.80 ? S.WALK : S.RUN;
+        next = r < 0.70 ? S.IDLE : r < 0.85 ? S.WALK : S.LOOK;
         break;
       default:
         next = S.IDLE;
