@@ -151,35 +151,53 @@ function removeBackground(img) {
   const bgColors = dist12 > 15*15 ? [c1, c2] : [c1];
   console.log('[BG] detected:', bgColors.map(c => `rgb(${c})`).join(' + '));
 
-  // ── Per-frame BFS (4×4 grid) ─────────────────────────────────────────
-  // Global BFS can miss background pockets enclosed by cat bodies in
-  // adjacent frames. Per-frame BFS seeds from each frame's own 4 edges,
-  // guaranteeing every frame's background is fully reachable.
-  // No seams appear because isBg is now consistent (same k-means colors).
   const REMOVE = 22 * 22;
   const isBg = i => {
-    if (data[i+3] === 0) return true;
+    if (data[i+3] === 0) return true;   // already transparent → treat as bg
     const r = data[i], g = data[i+1], b = data[i+2];
     return bgColors.some(([br,bg_,bb]) => (r-br)**2 + (g-bg_)**2 + (b-bb)**2 <= REMOVE);
   };
 
+  // ── Pass 1: global BFS from the 4 outer sheet edges ──────────────────
+  // Removes background reachable from outside; clears inter-frame corridors.
+  {
+    const vis = new Uint8Array(cw * ch), q = [];
+    const seed = (gx, gy) => {
+      if (gx < 0 || gx >= cw || gy < 0 || gy >= ch) return;
+      const p = gy*cw+gx;
+      if (vis[p] || !isBg(p*4)) return;
+      vis[p] = 1; q.push(gx, gy);
+    };
+    for (let x = 0; x < cw; x++) { seed(x, 0); seed(x, ch-1); }
+    for (let y = 1; y < ch-1; y++) { seed(0, y); seed(cw-1, y); }
+    for (let qi = 0; qi < q.length; ) {
+      const gx = q[qi++], gy = q[qi++];
+      data[(gy*cw+gx)*4+3] = 0;
+      seed(gx-1, gy); seed(gx+1, gy); seed(gx, gy-1); seed(gx, gy+1);
+    }
+  }
+
+  // ── Pass 2: per-frame BFS ─────────────────────────────────────────────
+  // Seeds from each frame's own 4 edges.  After pass 1, many edge pixels
+  // are now transparent (alpha=0); isBg returns true for them, so they
+  // act as additional seeds that let the BFS reach background pockets
+  // that were blocked by cat bodies in neighbouring frames.
   const fw = (cw / 4) | 0, fh = (ch / 4) | 0;
   for (let row = 0; row < 4; row++) {
     for (let col = 0; col < 4; col++) {
-      const x0 = col * fw, y0 = row * fh;
-      const x1 = x0 + fw, y1 = y0 + fh;
+      const x0 = col*fw, y0 = row*fh, x1 = x0+fw, y1 = y0+fh;
       const vis = new Uint8Array(fw * fh), q = [];
       const seed = (gx, gy) => {
         if (gx < x0 || gx >= x1 || gy < y0 || gy >= y1) return;
-        const lp = (gy - y0) * fw + (gx - x0);
-        if (vis[lp] || !isBg((gy * cw + gx) * 4)) return;
+        const lp = (gy-y0)*fw + (gx-x0);
+        if (vis[lp] || !isBg((gy*cw+gx)*4)) return;
         vis[lp] = 1; q.push(gx, gy);
       };
-      for (let x = x0; x < x1; x++) { seed(x, y0); seed(x, y1 - 1); }
-      for (let y = y0 + 1; y < y1 - 1; y++) { seed(x0, y); seed(x1 - 1, y); }
+      for (let x = x0; x < x1; x++) { seed(x, y0); seed(x, y1-1); }
+      for (let y = y0+1; y < y1-1; y++) { seed(x0, y); seed(x1-1, y); }
       for (let qi = 0; qi < q.length; ) {
         const gx = q[qi++], gy = q[qi++];
-        data[(gy * cw + gx) * 4 + 3] = 0;
+        data[(gy*cw+gx)*4+3] = 0;
         seed(gx-1, gy); seed(gx+1, gy); seed(gx, gy-1); seed(gx, gy+1);
       }
     }
