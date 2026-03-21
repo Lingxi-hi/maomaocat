@@ -209,7 +209,6 @@ class SpriteAnimator {
     const sy  = row * this.frameH;
 
     ctx.save();
-    ctx.globalCompositeOperation = 'multiply';
     if (flipH) {
       ctx.translate(destX + destW, destY);
       ctx.scale(-1, 1);
