@@ -561,8 +561,8 @@ async function startGame() {
 
   const animators = {
     run:  new SpriteAnimator(runImg),
-    walk: new SpriteAnimator(walkImg),
-    sit:  new SpriteAnimator(sitImg),
+    walk: new SpriteAnimator(removeBackground(walkImg)),
+    sit:  new SpriteAnimator(removeBackground(sitImg)),
   };
 
   const cat = new Cat(animators);
