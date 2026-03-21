@@ -209,6 +209,7 @@ class SpriteAnimator {
     const sy  = row * this.frameH;
 
     ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
     if (flipH) {
       ctx.translate(destX + destW, destY);
       ctx.scale(-1, 1);
@@ -559,11 +560,10 @@ async function startGame() {
 
   loading.classList.add('hidden');
 
-  // Strip solid background from each sprite sheet (or use PNG transparency directly)
   const animators = {
-    run:  new SpriteAnimator(removeBackground(runImg)),
-    walk: new SpriteAnimator(removeBackground(walkImg)),
-    sit:  new SpriteAnimator(removeBackground(sitImg)),
+    run:  new SpriteAnimator(runImg),
+    walk: new SpriteAnimator(walkImg),
+    sit:  new SpriteAnimator(sitImg),
   };
 
   const cat = new Cat(animators);
