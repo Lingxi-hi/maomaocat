@@ -324,6 +324,26 @@ const STONE_SPOTS = [
   { x: 960, y: 560, h: 20 },  // right path stone
 ];
 
+// ─────────────────────────────────────────
+// Eating spots — positions the cat can eat
+// (walkable ground locations for food bowl)
+// ─────────────────────────────────────────
+const EAT_SPOTS = [
+  { x: 400, y: 620 },
+  { x: 600, y: 650 },
+  { x: 800, y: 610 },
+  { x: 500, y: 580 },
+];
+
+function nearestEatSpot(x, y) {
+  let best = null, bestDist = Infinity;
+  for (const s of EAT_SPOTS) {
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return { spot: best, dist: bestDist };
+}
+
 function nearestStone(x, y) {
   let best = null, bestDist = Infinity;
   for (const s of STONE_SPOTS) {
@@ -345,6 +365,7 @@ const S = {
   STOPPING: 'STOPPING', // one-shot: walk frames reversed
   RISING:   'RISING',   // one-shot: stand up from sit
   JUMP:     'JUMP',     // one-shot: leap onto a stone
+  EAT:      'EAT',      // eating from bowl (player triggered)
 };
 
 // Frame sequences per state
@@ -357,6 +378,7 @@ const SEQ = {
   STOPPING: [7,6,5,4,3,2,1,0],
   RISING:   [0,1,2,3,4],
   JUMP:     [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+  EAT:      [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
 };
 
 // Which sprite sheet each state uses (key into animators object)
@@ -369,6 +391,7 @@ const SHEET = {
   STOPPING: 'walk',
   RISING:   'walk',
   JUMP:     'jump',
+  EAT:      'eat',
 };
 
 // Animation speed (frames per second) per state
@@ -381,19 +404,20 @@ const FPS = {
   STOPPING: 6,
   RISING:   5,
   JUMP:     9,
+  EAT:      3,
 };
 
 // Movement speed (px/s) per state
 const SPEED = {
   IDLE: 0, LOOK: 0, GROOM: 0,
-  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0, JUMP: 0,
+  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0, JUMP: 0, EAT: 0,
 };
 
 // One-shot states complete then hand off to nextState
 const ONE_SHOT = new Set([S.STOPPING, S.RISING, S.JUMP]);
 
 // ───────── stationary / moving sets for transition logic ─────────
-const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM]);
+const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM, S.EAT]);
 const MOVING     = new Set([S.WALK, S.RUN]);
 
 class Cat {
@@ -436,6 +460,7 @@ class Cat {
 
     // Player interaction
     this.pendingJumpStone = null; // stone to jump to after running close
+    this.pendingEat = false;      // run to eat spot then eat
 
     // Boot into IDLE
     this._applyState(S.IDLE);
@@ -473,6 +498,7 @@ class Cat {
         case S.WALK:  this.stateTimer = 15;           break; // timeout
         case S.RUN:   this.stateTimer = 8;            break; // timeout
         case S.JUMP:  this.stateTimer = 999;          break; // managed by one-shot
+        case S.EAT:   this.stateTimer = rand(8, 14);  break; // eat for a while
       }
     } else {
       this.stateTimer = 999; // managed by one-shot completion
@@ -588,6 +614,11 @@ class Cat {
       this._beginJump(stone);
       return;
     }
+    if (this.pendingEat) {
+      this.pendingEat = false;
+      this._applyState(S.STOPPING, S.EAT);
+      return;
+    }
     this.stateTimer = 0.001; // fire _chooseNext on next update
   }
 
@@ -677,6 +708,38 @@ class Cat {
       this.facingRight = stone.x > this.x;
       if (STATIONARY.has(this.state)) {
         this.onStoneH = 0;
+        this._applyState(S.RISING, S.RUN);
+      } else {
+        this._applyState(S.RUN);
+      }
+    }
+  }
+
+  // ── Player: E key → run to eat spot and eat ──
+  triggerEat() {
+    if (this.state === S.JUMP || this.state === S.EAT) return;
+    const { spot, dist } = nearestEatSpot(this.x, this.y);
+    if (!spot) return;
+
+    this.pendingJumpStone = null;
+
+    if (dist < 30) {
+      // Already at eat spot — start eating directly
+      if (MOVING.has(this.state)) {
+        this.pendingEat = true;
+        this._applyState(S.STOPPING, S.EAT);
+      } else {
+        this.onStoneH = 0;
+        this._applyState(S.EAT);
+      }
+    } else {
+      // Run to eat spot first
+      this.pendingEat = true;
+      this.tx = spot.x;
+      this.ty = spot.y;
+      this.facingRight = spot.x > this.x;
+      this.onStoneH = 0;
+      if (STATIONARY.has(this.state)) {
         this._applyState(S.RISING, S.RUN);
       } else {
         this._applyState(S.RUN);
@@ -822,14 +885,15 @@ async function startGame() {
   const loading = document.getElementById('loadingScreen');
   const loadMsg = document.getElementById('loadMsg');
 
-  let bgImg, runImg, walkImg, sitImg, jumpImg;
+  let bgImg, runImg, walkImg, sitImg, jumpImg, eatImg;
   try {
-    [bgImg, runImg, walkImg, sitImg, jumpImg] = await Promise.all([
+    [bgImg, runImg, walkImg, sitImg, jumpImg, eatImg] = await Promise.all([
       loadImage('bg.png'),
       loadImage('run.png'),
       loadImage('walk.png'),
       loadImage('sit.png'),
       loadImage('jump.png'),
+      loadImage('eat.png'),
     ]);
   } catch (failedSrc) {
     loadMsg.textContent = `图片加载失败：${failedSrc}`;
@@ -837,7 +901,7 @@ async function startGame() {
     const hint = document.createElement('p');
     hint.style.marginTop = '0.8em';
     hint.style.fontSize  = '0.85em';
-    hint.textContent = '请将 bg.png / run.png / walk.png / sit.png / jump.png 放入游戏目录后刷新';
+    hint.textContent = '请将 bg.png / run.png / walk.png / sit.png / jump.png / eat.png 放入游戏目录后刷新';
     loading.appendChild(hint);
     return;
   }
@@ -849,16 +913,20 @@ async function startGame() {
     walk: new SpriteAnimator(removeBackground(walkImg)),
     sit:  new SpriteAnimator(removeBackground(sitImg)),
     jump: new SpriteAnimator(removeBackground(jumpImg)),
+    eat:  new SpriteAnimator(removeBackground(eatImg)),
   };
 
   const cat = new Cat(animators);
 
   // ── Player input ──────────────────────────
-  // Spacebar → jump to nearest stone
+  // Spacebar → jump to nearest stone, E → eat
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
       e.preventDefault();
       cat.triggerJumpToStone();
+    }
+    if (e.code === 'KeyE') {
+      cat.triggerEat();
     }
   });
 
