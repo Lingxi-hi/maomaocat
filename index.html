@@ -434,6 +434,9 @@ class Cat {
     this.jumpShadowY  = 0;   // ground Y for shadow during jump
     this.onStoneH     = 0;   // visual lift when resting on stone
 
+    // Player interaction
+    this.pendingJumpStone = null; // stone to jump to after running close
+
     // Boot into IDLE
     this._applyState(S.IDLE);
     this.stateTimer = rand(2, 3); // brief pause before first action
@@ -579,6 +582,12 @@ class Cat {
 
   // ── Called when cat reaches walk/run destination ──
   _arrive() {
+    if (this.pendingJumpStone) {
+      const stone = this.pendingJumpStone;
+      this.pendingJumpStone = null;
+      this._beginJump(stone);
+      return;
+    }
     this.stateTimer = 0.001; // fire _chooseNext on next update
   }
 
@@ -639,6 +648,81 @@ class Cat {
       if (this.stateTimer <= 0) {
         this._chooseNext();
       }
+    }
+  }
+
+  // ── Player: spacebar → jump to nearest stone ──
+  triggerJumpToStone() {
+    if (this.state === S.JUMP) return;
+    const { stone, dist } = nearestStone(this.x, this.y);
+    if (!stone) return;
+
+    this.pendingJumpStone = null;
+
+    if (dist < 120) {
+      // Close enough — jump directly (or RISING first if stationary)
+      if (STATIONARY.has(this.state)) {
+        this.onStoneH = 0;
+        this.facingRight = stone.x > this.x;
+        this.pendingJumpStone = stone;
+        this._applyState(S.RISING, S.RUN);
+        return;
+      }
+      this._beginJump(stone);
+    } else {
+      // Too far — run to stone first, then jump on arrival
+      this.pendingJumpStone = stone;
+      this.tx = stone.x;
+      this.ty = stone.y;
+      this.facingRight = stone.x > this.x;
+      if (STATIONARY.has(this.state)) {
+        this.onStoneH = 0;
+        this._applyState(S.RISING, S.RUN);
+      } else {
+        this._applyState(S.RUN);
+      }
+    }
+  }
+
+  // ── Player: hit-test for mouse click on cat ──
+  isClickOnCat(canvasX, canvasY) {
+    const { w, h } = this.drawSize();
+    const stoneOff = (this.state !== S.JUMP) ? this.onStoneH : 0;
+    const left   = this.x - w / 2 - 10;
+    const right  = this.x + w / 2 + 10;
+    const top    = this.y - h - stoneOff - 10;
+    const bottom = this.y - stoneOff + 10;
+    return canvasX >= left && canvasX <= right && canvasY >= top && canvasY <= bottom;
+  }
+
+  // ── Player: click on cat → flee away from click ──
+  triggerFlee(clickX, clickY) {
+    if (this.state === S.JUMP) return;
+
+    let dx = this.x - clickX;
+    let dy = this.y - clickY;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len;
+    dy /= len;
+
+    // Find a walkable flee target ~300px away
+    let tx, ty;
+    for (let d = 300; d > 50; d -= 50) {
+      tx = clamp(this.x + dx * d, 120, 1050);
+      ty = clamp(this.y + dy * d, 440, 700);
+      if (!isObstacle(tx, ty)) break;
+    }
+
+    this.pendingJumpStone = null;
+    this.onStoneH = 0;
+    this.tx = tx;
+    this.ty = ty;
+    this.facingRight = tx > this.x;
+
+    if (STATIONARY.has(this.state)) {
+      this._applyState(S.RISING, S.RUN);
+    } else {
+      this._applyState(S.RUN);
     }
   }
 
@@ -768,6 +852,27 @@ async function startGame() {
   };
 
   const cat = new Cat(animators);
+
+  // ── Player input ──────────────────────────
+  // Spacebar → jump to nearest stone
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      cat.triggerJumpToStone();
+    }
+  });
+
+  // Click on cat → flee
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const scaleY = H / rect.height;
+    const cx = (e.clientX - rect.left) * scaleX;
+    const cy = (e.clientY - rect.top) * scaleY;
+    if (cat.isClickOnCat(cx, cy)) {
+      cat.triggerFlee(cx, cy);
+    }
+  });
 
   let lastTime = 0;
   function loop(ts) {
