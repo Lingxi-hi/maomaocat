@@ -366,6 +366,7 @@ const S = {
   RISING:   'RISING',   // one-shot: stand up from sit
   JUMP:     'JUMP',     // one-shot: leap onto a stone
   EAT:      'EAT',      // eating from bowl (player triggered)
+  HUNGRY:   'HUNGRY',   // 饿了，趴下来看起来很可怜
 };
 
 // Frame sequences per state
@@ -379,6 +380,7 @@ const SEQ = {
   RISING:   [0,1,2,3,4],
   JUMP:     [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
   EAT:      [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+  HUNGRY:   [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
 };
 
 // Which sprite sheet each state uses (key into animators object)
@@ -392,6 +394,7 @@ const SHEET = {
   RISING:   'walk',
   JUMP:     'jump',
   EAT:      'eat',
+  HUNGRY:   'hungry',
 };
 
 // Animation speed (frames per second) per state
@@ -405,19 +408,20 @@ const FPS = {
   RISING:   5,
   JUMP:     9,
   EAT:      3,
+  HUNGRY:   1.5,
 };
 
 // Movement speed (px/s) per state
 const SPEED = {
   IDLE: 0, LOOK: 0, GROOM: 0,
-  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0, JUMP: 0, EAT: 0,
+  WALK: 45, RUN: 120, STOPPING: 0, RISING: 0, JUMP: 0, EAT: 0, HUNGRY: 0,
 };
 
 // One-shot states complete then hand off to nextState
 const ONE_SHOT = new Set([S.STOPPING, S.RISING, S.JUMP]);
 
 // ───────── stationary / moving sets for transition logic ─────────
-const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM, S.EAT]);
+const STATIONARY = new Set([S.IDLE, S.LOOK, S.GROOM, S.EAT, S.HUNGRY]);
 const MOVING     = new Set([S.WALK, S.RUN]);
 
 class Cat {
@@ -461,6 +465,7 @@ class Cat {
     // Player interaction
     this.pendingJumpStone = null; // stone to jump to after running close
     this.pendingEat = false;      // run to eat spot then eat
+    this.hungerTimer = rand(60, 120); // seconds until hungry (1-2 min)
 
     // Boot into IDLE
     this._applyState(S.IDLE);
@@ -498,7 +503,8 @@ class Cat {
         case S.WALK:  this.stateTimer = 15;           break; // timeout
         case S.RUN:   this.stateTimer = 8;            break; // timeout
         case S.JUMP:  this.stateTimer = 999;          break; // managed by one-shot
-        case S.EAT:   this.stateTimer = rand(8, 14);  break; // eat for a while
+        case S.EAT:   this.stateTimer = rand(8, 14); this.hungerTimer = rand(60, 120); break; // eat for a while, reset hunger
+        case S.HUNGRY: this.stateTimer = rand(10, 18); break; // stay hungry for a while
       }
     } else {
       this.stateTimer = 999; // managed by one-shot completion
@@ -566,6 +572,13 @@ class Cat {
       return;
     }
 
+    // Hunger check: if timer expired and hungry sheet loaded, go hungry
+    if (this.hungerTimer <= 0 && this.anim.hungry) {
+      this.hungerTimer = rand(60, 120); // reset for next episode
+      this._beginBehavior(S.HUNGRY);
+      return;
+    }
+
     const r = Math.random();
     let next;
 
@@ -591,6 +604,9 @@ class Cat {
         break;
       case S.RUN:
         next = r < 0.70 ? S.IDLE : r < 0.85 ? S.WALK : S.LOOK;
+        break;
+      case S.HUNGRY:
+        next = r < 0.70 ? S.IDLE : r < 0.90 ? S.WALK : S.LOOK;
         break;
       default:
         next = S.IDLE;
@@ -685,6 +701,11 @@ class Cat {
       if (this.stateTimer <= 0) {
         this._chooseNext();
       }
+    }
+
+    // 4. Hunger timer countdown
+    if (this.hungerTimer > 0) {
+      this.hungerTimer -= dt;
     }
   }
 
@@ -918,6 +939,12 @@ async function startGame() {
     console.warn('[IMG] eat.png not found — eat feature disabled');
   }
 
+  // hungry.png is optional — hungry feature disabled if missing
+  let hungryImg = null;
+  try { hungryImg = await loadImage('hungry.png'); } catch (_) {
+    console.warn('[IMG] hungry.png not found — hungry feature disabled');
+  }
+
   loading.classList.add('hidden');
 
   const animators = {
@@ -925,7 +952,8 @@ async function startGame() {
     walk: new SpriteAnimator(removeBackground(walkImg)),
     sit:  new SpriteAnimator(removeBackground(sitImg)),
     jump: new SpriteAnimator(removeBackground(jumpImg)),
-    eat:  eatImg ? new SpriteAnimator(removeBackground(eatImg)) : null,
+    eat:    eatImg ? new SpriteAnimator(removeBackground(eatImg)) : null,
+    hungry: hungryImg ? new SpriteAnimator(removeBackground(hungryImg)) : null,
   };
 
   const cat = new Cat(animators);
